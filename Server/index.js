@@ -22,7 +22,7 @@ const handleCreateClass = async (c) => {
     const name = body.name || 'כיתה ללא שם';
     
     const newClass = {
-      id: Math.random().toString(36.substring(2, 9)),
+      id: Math.random().toString(36).substring(2, 9),
       name: name,
       code: Math.floor(1000 + Math.random() * 9000).toString(), // קוד ספרתי אקראי
       membersCount: 1
@@ -47,7 +47,7 @@ app.post('/api/classes/join', async (c) => {
     const targetClass = classes.find((cls) => cls.code === code);
 
     if (!targetClass) {
-      return c.json({ success: false, error: 'קוד כיתה שגוי או לא موجود' }, 400);
+      return c.json({ success: false, error: 'קוד כיתה שגוי או לא קיים' }, 400);
     }
 
     targetClass.membersCount += 1;
