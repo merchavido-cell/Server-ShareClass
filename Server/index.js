@@ -1,122 +1,67 @@
-export class Room {
-  constructor(state, env) {
-    this.state = state;
-    this.storage = state.storage;
-  }
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 
-  async fetch(request) {
-    const url = new URL(request.url);
-    const method = request.method;
+const app = new Hono();
 
-    // שליפת רשימת הכיתות או יצירת כיתה חדשה
-    if (url.pathname.endsWith("/api/classes")) {
-      if (method === "GET") {
-        let classes = await this.storage.get("classes") || [];
-        return new Response(JSON.stringify({ success: true, classes }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
+// הפעלת CORS לכל הבקשות
+app.use('/*', cors());
 
-      if (method === "POST") {
-        const body = await request.json();
-        let classes = await this.storage.get("classes") || [];
-        
-        const newClass = {
-          id: "class_" + Math.random().toString(36).substring(2, 9),
-          name: body.name,
-          code: Math.random().toString(36).substring(2, 8).toUpperCase(),
-          members: 1
-        };
+// שמירת הנתונים בזיכרון (חלופי ל-Durable Objects עבור Render)
+let classes = [];
 
-        classes.push(newClass);
-        await this.storage.put("classes", classes);
+// GET /api/classes - שליפת רשימת הכיתות
+app.get('/api/classes', (c) => {
+  return c.json(classes);
+});
 
-        return new Response(JSON.stringify({ success: true, class: newClass }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-    }
+// POST /api/classes או /api/classes/create - יצירת כיתה חדשה
+const handleCreateClass = async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const name = body.name || 'כיתה ללא שם';
+    
+    const newClass = {
+      id: Math.random().toString(36.substring(2, 9)),
+      name: name,
+      code: Math.floor(1000 + Math.random() * 9000).toString(), // קוד ספרתי אקראי
+      membersCount: 1
+    };
 
-    if (url.pathname.endsWith("/api/classes/create")) {
-      const body = await request.json();
-      let classes = await this.storage.get("classes") || [];
-      
-      const newClass = {
-        id: "class_" + Math.random().toString(36).substring(2, 9),
-        name: body.name,
-        code: Math.random().toString(36).substring(2, 8).toUpperCase(),
-        members: 1
-      };
-
-      classes.push(newClass);
-      await this.storage.put("classes", classes);
-
-      return new Response(JSON.stringify({ success: true, class: newClass }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    if (url.pathname.endsWith("/api/classes/join")) {
-      const body = await request.json();
-      let classes = await this.storage.get("classes") || [];
-      
-      const targetClass = classes.find(c => c.code === body.code);
-      if (targetClass) {
-        targetClass.members = (targetClass.members || 1) + 1;
-        await this.storage.put("classes", classes);
-        return new Response(JSON.stringify({ success: true, class: targetClass }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        });
-      } else {
-        return new Response(JSON.stringify({ success: false, message: "Invalid class code" }), {
-          status: 400,
-          headers: { "Content-Type": "application/json" }
-        });
-      }
-    }
-
-    return new Response("Not Found", { status: 404 });
-  }
-}
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
-  "Access-Control-Allow-Headers": "*"
-};
-
-export default {
-  async fetch(request, env) {
-    if (request.method === "OPTIONS") {
-      return new Response("OK", { status: 200, headers: corsHeaders });
-    }
-
-    try {
-      // נשתמש ב-Durable Object גלובלי או מנוהל לפי מזהה קבוע לאחסון הנתונים המשותפים
-      const id = env.ROOM.idFromName("global_shareclass_room");
-      const room = env.ROOM.get(id);
-      
-      const response = await room.fetch(request);
-      
-      const newHeaders = new Headers(response.headers);
-      for (const [key, value] of Object.entries(corsHeaders)) {
-        newHeaders.set(key, value);
-      }
-
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: newHeaders
-      });
-    } catch (error) {
-      return new Response(
-        JSON.stringify({ success: false, error: error.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
+    classes.push(newClass);
+    return c.json({ success: true, class: newClass });
+  } catch (error) {
+    return c.json({ success: false, error: 'Invalid request' }, 400);
   }
 };
+
+app.post('/api/classes', handleCreateClass);
+app.post('/api/classes/create', handleCreateClass);
+
+// POST /api/classes/join - הצטרפות לכיתה לפי קוד
+app.post('/api/classes/join', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { code } = body;
+
+    const targetClass = classes.find((cls) => cls.code === code);
+
+    if (!targetClass) {
+      return c.json({ success: false, error: 'קוד כיתה שגוי או לא موجود' }, 400);
+    }
+
+    targetClass.membersCount += 1;
+    return c.json({ success: true, class: targetClass });
+  } catch (error) {
+    return c.json({ success: false, error: 'Invalid request' }, 400);
+  }
+});
+
+// התאמה ל-Render: שימוש בפורט הדינמי שהוגדר בסביבת העבודה או ברירת מחדל 3000
+const port = process.env.PORT || 3000;
+console.log(`Server is running on port ${port}`);
+
+serve({
+  fetch: app.fetch,
+  port: Number(port)
+});
