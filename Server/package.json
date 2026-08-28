@@ -1,0 +1,16 @@
+{
+  "name": "extratag-shareclass",
+  "version": "1.0.0",
+  "description": "ExtraTag ShareClass running on Cloudflare Workers",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.13.3"
+  },
+  "devDependencies": {
+    "wrangler": "^3.114.17"
+  }
+}
