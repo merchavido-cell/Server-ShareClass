@@ -158,12 +158,14 @@ const handleCreateClass = async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const name = body.name || 'כיתה ללא שם';
+    const userId = body.userId || null;
 
     const newClass = {
       id: Math.random().toString(36).substring(2, 9),
       name: name,
       code: Math.floor(1000 + Math.random() * 9000).toString(),
       membersCount: 1,
+      members: userId ? [userId] : [], // רשימת מזהי משתמשים שכבר חברים בכיתה
       files: [] // רשימת קבצים שייכת מעתה לאובייקט הכיתה עצמו
     };
 
@@ -185,7 +187,7 @@ app.post('/api/classes/create', handleCreateClass);
 app.post('/api/classes/join', async (c) => {
   try {
     const body = await c.req.json();
-    const { code } = body;
+    const { code, userId } = body;
 
     const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.code === code);
@@ -194,8 +196,16 @@ app.post('/api/classes/join', async (c) => {
       return c.json({ success: false, error: 'קוד כיתה שגוי או לא קיים' }, 400);
     }
 
-    targetClass.membersCount += 1;
-    await writeClassesToGitHub(classes, sha);
+    if (!targetClass.members) targetClass.members = [];
+
+    // אם יש לנו מזהה משתמש (למשל אימייל) והוא כבר ברשימת החברים - לא מוסיפים שוב ולא מגדילים ספירה
+    const alreadyMember = userId && targetClass.members.includes(userId);
+
+    if (!alreadyMember) {
+      if (userId) targetClass.members.push(userId);
+      targetClass.membersCount = (targetClass.membersCount || 0) + 1;
+      await writeClassesToGitHub(classes, sha);
+    }
 
     return c.json({ success: true, class: targetClass });
   } catch (error) {
