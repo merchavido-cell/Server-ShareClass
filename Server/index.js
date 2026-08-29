@@ -21,11 +21,15 @@ async function readClassesFromGitHub() {
         'User-Agent': 'ShareClass-Server'
       }
     });
-    if (!res.ok) return { classes: [], sha: null };
+    if (!res.ok) {
+      console.error('GitHub read failed:', res.status, await res.text());
+      return { classes: [], sha: null };
+    }
     const data = await res.json();
     const content = Buffer.from(data.content, 'base64').toString('utf-8');
     return { classes: JSON.parse(content || '[]'), sha: data.sha };
   } catch (error) {
+    console.error('GitHub read error:', error);
     return { classes: [], sha: null };
   }
 }
@@ -33,7 +37,8 @@ async function readClassesFromGitHub() {
 // פונקציה לכתיבת הנתונים בחזרה ל-GitHub
 async function writeClassesToGitHub(classes, sha) {
   const contentEncoded = Buffer.from(JSON.stringify(classes, null, 2)).toString('base64');
-  await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
+
+  const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
     method: 'PUT',
     headers: {
       Authorization: `token ${GITHUB_TOKEN}`,
@@ -47,7 +52,44 @@ async function writeClassesToGitHub(classes, sha) {
       sha: sha
     })
   });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    console.error('GitHub write failed:', res.status, errBody);
+    throw new Error(`GitHub write failed (${res.status}): ${errBody}`);
+  }
+
+  return res.json();
 }
+
+// GET /api/debug/github - בדיקת חיבור וטוקן ל-GitHub (זמני, אפשר להסיר בהמשך)
+app.get('/api/debug/github', async (c) => {
+  const hasToken = !!GITHUB_TOKEN;
+  const tokenLength = GITHUB_TOKEN ? GITHUB_TOKEN.length : 0;
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'ShareClass-Server'
+      }
+    });
+
+    return c.json({
+      hasToken,
+      tokenLength,
+      githubStatus: res.status,
+      githubStatusText: res.statusText
+    });
+  } catch (error) {
+    return c.json({
+      hasToken,
+      tokenLength,
+      error: error.message
+    }, 500);
+  }
+});
 
 // GET /api/classes - שליפת רשימת הכיתות
 app.get('/api/classes', async (c) => {
@@ -60,7 +102,7 @@ const handleCreateClass = async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
     const name = body.name || 'כיתה ללא שם';
-    
+
     const newClass = {
       id: Math.random().toString(36).substring(2, 9),
       name: name,
@@ -74,7 +116,8 @@ const handleCreateClass = async (c) => {
 
     return c.json({ success: true, class: newClass });
   } catch (error) {
-    return c.json({ success: false, error: 'Invalid request' }, 400);
+    console.error('Create class error:', error);
+    return c.json({ success: false, error: 'Failed to save class' }, 500);
   }
 };
 
@@ -99,7 +142,8 @@ app.post('/api/classes/join', async (c) => {
 
     return c.json({ success: true, class: targetClass });
   } catch (error) {
-    return c.json({ success: false, error: 'Invalid request' }, 400);
+    console.error('Join class error:', error);
+    return c.json({ success: false, error: 'Failed to join class' }, 500);
   }
 });
 
