@@ -10,6 +10,48 @@ const REPO = "merchavido-cell/Server-ShareClass";
 const FILE_PATH = "Server/all_class.json";
 const FILES_DIR = "Server/files"; // תיקייה ב-GitHub בה יישמר תוכן הקבצים שמועלים
 
+// ---------- זיהוי MIME type לפי סיומת, כדי לאפשר פתיחה בדפדפן (לא רק הורדה) ----------
+
+const MIME_TYPES = {
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  html: 'text/html',
+  htm: 'text/html',
+  json: 'application/json',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip',
+};
+
+function getMimeType(fileName) {
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  return MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+// קבצים מסוגים אלו הדפדפן יודע להציג inline (לא רק להוריד)
+const INLINE_VIEWABLE = new Set([
+  'application/pdf', 'text/plain', 'text/csv', 'text/html', 'application/json',
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
+  'video/mp4', 'video/webm', 'video/quicktime', 'audio/mpeg', 'audio/wav'
+]);
+
 // ---------- עזרי GitHub: קריאה/כתיבה גנריים לכל path ----------
 
 async function githubGetFile(path) {
@@ -212,10 +254,11 @@ app.get('/api/classes/:id/files', async (c) => {
   return c.json(files);
 });
 
-// GET /api/files/:id/download - הורדת קובץ (מאתר את הכיתה שמחזיקה את הקובץ, ואז מביא אותו מ-GitHub)
+// GET /api/files/:id/download - הבאת קובץ. ?view=1 → פתיחה inline בדפדפן (אם הסוג נתמך); בלי הפרמטר → הורדה תמיד
 app.get('/api/files/:id/download', async (c) => {
   try {
     const fileId = c.req.param('id');
+    const wantsView = c.req.query('view') === '1';
     const { classes } = await readClassesFromGitHub();
 
     let foundFile = null;
@@ -237,10 +280,14 @@ app.get('/api/files/:id/download', async (c) => {
     }
 
     const buffer = Buffer.from(data.content, 'base64');
+    const mimeType = getMimeType(foundFile.name);
+
+    // פתיחה inline רק אם ביקשו זאת וגם הדפדפן יודע להציג את הסוג הזה; אחרת תמיד הורדה
+    const useInline = wantsView && INLINE_VIEWABLE.has(mimeType);
 
     return c.body(buffer, 200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${foundFile.name}"`
+      'Content-Type': mimeType,
+      'Content-Disposition': `${useInline ? 'inline' : 'attachment'}; filename="${foundFile.name}"`
     });
   } catch (error) {
     console.error('File download error:', error);
