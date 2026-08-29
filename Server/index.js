@@ -45,6 +45,14 @@ function getMimeType(fileName) {
   return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
+// כותרות HTTP חייבות להיות ASCII — שם קובץ עם עברית/תווים לא-ASCII חייב קידוד לפי RFC 5987.
+// נותנים גם fallback ASCII (filename=) וגם את השם המקורי המקודד (filename*=UTF-8''...)
+function buildContentDisposition(disposition, fileName) {
+  const asciiFallback = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'");
+  const encoded = encodeURIComponent(fileName);
+  return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
+}
+
 // קבצים מסוגים אלו הדפדפן יודע להציג inline (לא רק להוריד)
 const INLINE_VIEWABLE = new Set([
   'application/pdf', 'text/plain', 'text/csv', 'text/html', 'application/json',
@@ -287,7 +295,7 @@ app.get('/api/files/:id/download', async (c) => {
 
     return c.body(buffer, 200, {
       'Content-Type': mimeType,
-      'Content-Disposition': `${useInline ? 'inline' : 'attachment'}; filename="${foundFile.name}"`
+      'Content-Disposition': buildContentDisposition(useInline ? 'inline' : 'attachment', foundFile.name)
     });
   } catch (error) {
     console.error('File download error:', error);
