@@ -8,37 +8,29 @@ app.use('/*', cors());
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO = "merchavido-cell/Server-ShareClass";
 const FILE_PATH = "Server/all_class.json";
+const FILES_DIR = "Server/files"; // תיקייה ב-GitHub בה יישמר תוכן הקבצים שמועלים
 
-const classFiles = {};
+// ---------- עזרי GitHub: קריאה/כתיבה גנריים לכל path ----------
 
-// פונקציה לקריאת הנתונים מ-GitHub
-async function readClassesFromGitHub() {
-  try {
-    const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
-      headers: {
-        Authorization: `token ${GITHUB_TOKEN}`,
-        Accept: 'application/vnd.github.v3+json',
-        'User-Agent': 'ShareClass-Server'
-      }
-    });
-    if (!res.ok) {
-      console.error('GitHub read failed:', res.status, await res.text());
-      return { classes: [], sha: null };
+async function githubGetFile(path) {
+  const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${path}`, {
+    headers: {
+      Authorization: `token ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'ShareClass-Server'
     }
-    const data = await res.json();
-    const content = Buffer.from(data.content, 'base64').toString('utf-8');
-    return { classes: JSON.parse(content || '[]'), sha: data.sha };
-  } catch (error) {
-    console.error('GitHub read error:', error);
-    return { classes: [], sha: null };
+  });
+  if (!res.ok) {
+    if (res.status !== 404) {
+      console.error(`GitHub read failed (${path}):`, res.status, await res.text());
+    }
+    return null; // לא קיים / נכשל
   }
+  return res.json();
 }
 
-// פונקציה לכתיבת הנתונים בחזרה ל-GitHub
-async function writeClassesToGitHub(classes, sha) {
-  const contentEncoded = Buffer.from(JSON.stringify(classes, null, 2)).toString('base64');
-
-  const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
+async function githubPutFile(path, base64Content, sha, message) {
+  const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${path}`, {
     method: 'PUT',
     headers: {
       Authorization: `token ${GITHUB_TOKEN}`,
@@ -47,19 +39,37 @@ async function writeClassesToGitHub(classes, sha) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      message: 'Update all_class.json automatically from server',
-      content: contentEncoded,
-      sha: sha
+      message: message || `Update ${path}`,
+      content: base64Content,
+      ...(sha ? { sha } : {})
     })
   });
 
   if (!res.ok) {
     const errBody = await res.text();
-    console.error('GitHub write failed:', res.status, errBody);
+    console.error(`GitHub write failed (${path}):`, res.status, errBody);
     throw new Error(`GitHub write failed (${res.status}): ${errBody}`);
   }
-
   return res.json();
+}
+
+// ---------- ניהול all_class.json ----------
+
+async function readClassesFromGitHub() {
+  const data = await githubGetFile(FILE_PATH);
+  if (!data) return { classes: [], sha: null };
+  const content = Buffer.from(data.content, 'base64').toString('utf-8');
+  try {
+    return { classes: JSON.parse(content || '[]'), sha: data.sha };
+  } catch (e) {
+    console.error('Failed to parse all_class.json:', e);
+    return { classes: [], sha: data.sha };
+  }
+}
+
+async function writeClassesToGitHub(classes, sha) {
+  const contentEncoded = Buffer.from(JSON.stringify(classes, null, 2)).toString('base64');
+  return githubPutFile(FILE_PATH, contentEncoded, sha, 'Update all_class.json automatically from server');
 }
 
 // GET /api/debug/github - בדיקת חיבור וטוקן ל-GitHub (זמני, אפשר להסיר בהמשך)
@@ -83,11 +93,7 @@ app.get('/api/debug/github', async (c) => {
       githubStatusText: res.statusText
     });
   } catch (error) {
-    return c.json({
-      hasToken,
-      tokenLength,
-      error: error.message
-    }, 500);
+    return c.json({ hasToken, tokenLength, error: error.message }, 500);
   }
 });
 
@@ -107,7 +113,8 @@ const handleCreateClass = async (c) => {
       id: Math.random().toString(36).substring(2, 9),
       name: name,
       code: Math.floor(1000 + Math.random() * 9000).toString(),
-      membersCount: 1
+      membersCount: 1,
+      files: [] // רשימת קבצים שייכת מעתה לאובייקט הכיתה עצמו
     };
 
     const { classes, sha } = await readClassesFromGitHub();
@@ -147,7 +154,7 @@ app.post('/api/classes/join', async (c) => {
   }
 });
 
-// POST /api/classes/:id/files - העלאת קובץ לכיתה
+// POST /api/classes/:id/files - העלאת קובץ לכיתה (נשמר בפועל ב-GitHub, מקושר לנתוני הכיתה)
 app.post('/api/classes/:id/files', async (c) => {
   try {
     const classId = c.req.param('id');
@@ -159,32 +166,45 @@ app.post('/api/classes/:id/files', async (c) => {
       return c.json({ success: false, error: 'No file uploaded' }, 400);
     }
 
-    if (!classFiles[classId]) {
-      classFiles[classId] = [];
+    const { classes, sha } = await readClassesFromGitHub();
+    const targetClass = classes.find((cls) => cls.id === classId);
+
+    if (!targetClass) {
+      return c.json({ success: false, error: 'Class not found' }, 404);
     }
 
+    const fileId = Math.random().toString(36).substring(2, 9);
     const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const base64Content = Buffer.from(arrayBuffer).toString('base64');
+    const storagePath = `${FILES_DIR}/${classId}/${fileId}_${file.name}`;
 
-    const newFile = {
-      id: Math.random().toString(36).substring(2, 9),
-      name: file.name,
-      uploader: uploader,
-      buffer: buffer
-    };
+    // שמירת תוכן הקובץ עצמו כ-blob ב-GitHub
+    await githubPutFile(storagePath, base64Content, null, `Upload file ${file.name} to class ${classId}`);
 
-    classFiles[classId].push(newFile);
-    return c.json({ success: true, file: { id: newFile.id, name: newFile.name, uploader: newFile.uploader } });
+    // עדכון מטא-דאטה של הקובץ בתוך אובייקט הכיתה, ושמירה חזרה ל-all_class.json
+    if (!targetClass.files) targetClass.files = [];
+    const newFileMeta = { id: fileId, name: file.name, uploader, path: storagePath };
+    targetClass.files.push(newFileMeta);
+    await writeClassesToGitHub(classes, sha);
+
+    return c.json({ success: true, file: { id: newFileMeta.id, name: newFileMeta.name, uploader: newFileMeta.uploader } });
   } catch (error) {
     console.error('File upload error:', error);
     return c.json({ success: false, error: 'Failed to upload file' }, 500);
   }
 });
 
-// GET /api/classes/:id/files - שליפת רשימת קבצים לכיתה
-app.get('/api/classes/:id/files', (c) => {
+// GET /api/classes/:id/files - שליפת רשימת קבצים לכיתה (מתוך נתוני הכיתה עצמם)
+app.get('/api/classes/:id/files', async (c) => {
   const classId = c.req.param('id');
-  const files = (classFiles[classId] || []).map(f => ({
+  const { classes } = await readClassesFromGitHub();
+  const targetClass = classes.find((cls) => cls.id === classId);
+
+  if (!targetClass) {
+    return c.json([], 404);
+  }
+
+  const files = (targetClass.files || []).map(f => ({
     id: f.id,
     name: f.name,
     uploader: f.uploader
@@ -192,27 +212,40 @@ app.get('/api/classes/:id/files', (c) => {
   return c.json(files);
 });
 
-// GET /api/files/:id/download - הורדת קובץ
-app.get('/api/files/:id/download', (c) => {
-  const fileId = c.req.param('id');
-  let foundFile = null;
+// GET /api/files/:id/download - הורדת קובץ (מאתר את הכיתה שמחזיקה את הקובץ, ואז מביא אותו מ-GitHub)
+app.get('/api/files/:id/download', async (c) => {
+  try {
+    const fileId = c.req.param('id');
+    const { classes } = await readClassesFromGitHub();
 
-  for (let cid in classFiles) {
-    const file = classFiles[cid].find(f => f.id === fileId);
-    if (file) {
-      foundFile = file;
-      break;
+    let foundFile = null;
+    for (const cls of classes) {
+      const match = (cls.files || []).find(f => f.id === fileId);
+      if (match) {
+        foundFile = match;
+        break;
+      }
     }
-  }
 
-  if (!foundFile) {
-    return c.text('File not found', 404);
-  }
+    if (!foundFile) {
+      return c.text('File not found', 404);
+    }
 
-  return c.body(foundFile.buffer, 200, {
-    'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename="${foundFile.name}"`
-  });
+    const data = await githubGetFile(foundFile.path);
+    if (!data) {
+      return c.text('File content not found', 404);
+    }
+
+    const buffer = Buffer.from(data.content, 'base64');
+
+    return c.body(buffer, 200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${foundFile.name}"`
+    });
+  } catch (error) {
+    console.error('File download error:', error);
+    return c.text('Failed to download file', 500);
+  }
 });
 
 // הפעלת השרת
