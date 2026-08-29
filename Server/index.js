@@ -6,8 +6,8 @@ const app = new Hono();
 app.use('/*', cors());
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO = "merchavido-cell/Server-ShareClass"; // שם המאגר שלך
-const FILE_PATH = "Server/all_class.json"; // הנתיב לקובץ במאגר
+const REPO = "merchavido-cell/Server-ShareClass";
+const FILE_PATH = "Server/all_class.json";
 
 const classFiles = {};
 
@@ -21,7 +21,7 @@ async function readClassesFromGitHub() {
         'User-Agent': 'ShareClass-Server'
       }
     });
-    if (!res.ok) return [];
+    if (!res.ok) return { classes: [], sha: null };
     const data = await res.json();
     const content = Buffer.from(data.content, 'base64').toString('utf-8');
     return { classes: JSON.parse(content || '[]'), sha: data.sha };
@@ -30,7 +30,7 @@ async function readClassesFromGitHub() {
   }
 }
 
-// פונקציה לכתיבת הנתונים בחזרה ל-GitHub (יוצרת Commit אוטומטי)
+// פונקציה לכתיבת הנתונים בחזרה ל-GitHub
 async function writeClassesToGitHub(classes, sha) {
   const contentEncoded = Buffer.from(JSON.stringify(classes, null, 2)).toString('base64');
   await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
@@ -49,13 +49,13 @@ async function writeClassesToGitHub(classes, sha) {
   });
 }
 
-// GET /api/classes
+// GET /api/classes - שליפת רשימת הכיתות
 app.get('/api/classes', async (c) => {
   const { classes } = await readClassesFromGitHub();
   return c.json(classes);
 });
 
-// POST /api/classes
+// POST /api/classes או /api/classes/create - יצירת כיתה חדשה
 const handleCreateClass = async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -81,7 +81,7 @@ const handleCreateClass = async (c) => {
 app.post('/api/classes', handleCreateClass);
 app.post('/api/classes/create', handleCreateClass);
 
-// POST /api/classes/join
+// POST /api/classes/join - הצטרפות לכיתה לפי קוד
 app.post('/api/classes/join', async (c) => {
   try {
     const body = await c.req.json();
@@ -103,7 +103,79 @@ app.post('/api/classes/join', async (c) => {
   }
 });
 
-// שאר נתיבי העלאת הקבצים נשארים לפי הצורך...
+// POST /api/classes/:id/files - העלאת קובץ לכיתה
+app.post('/api/classes/:id/files', async (c) => {
+  try {
+    const classId = c.req.param('id');
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    const uploader = body['uploader'] || 'Member';
 
+    if (!file || typeof file === 'string') {
+      return c.json({ success: false, error: 'No file uploaded' }, 400);
+    }
+
+    if (!classFiles[classId]) {
+      classFiles[classId] = [];
+    }
+
+    const arrayBuffer = await file.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const newFile = {
+      id: Math.random().toString(36).substring(2, 9),
+      name: file.name,
+      uploader: uploader,
+      buffer: buffer
+    };
+
+    classFiles[classId].push(newFile);
+    return c.json({ success: true, file: { id: newFile.id, name: newFile.name, uploader: newFile.uploader } });
+  } catch (error) {
+    console.error('File upload error:', error);
+    return c.json({ success: false, error: 'Failed to upload file' }, 500);
+  }
+});
+
+// GET /api/classes/:id/files - שליפת רשימת קבצים לכיתה
+app.get('/api/classes/:id/files', (c) => {
+  const classId = c.req.param('id');
+  const files = (classFiles[classId] || []).map(f => ({
+    id: f.id,
+    name: f.name,
+    uploader: f.uploader
+  }));
+  return c.json(files);
+});
+
+// GET /api/files/:id/download - הורדת קובץ
+app.get('/api/files/:id/download', (c) => {
+  const fileId = c.req.param('id');
+  let foundFile = null;
+
+  for (let cid in classFiles) {
+    const file = classFiles[cid].find(f => f.id === fileId);
+    if (file) {
+      foundFile = file;
+      break;
+    }
+  }
+
+  if (!foundFile) {
+    return c.text('File not found', 404);
+  }
+
+  return c.body(foundFile.buffer, 200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${foundFile.name}"`
+  });
+});
+
+// הפעלת השרת
 const port = process.env.PORT || 3000;
-serve({ fetch: app.fetch, port: Number(port) });
+console.log(`Server is running on port ${port}`);
+
+serve({
+  fetch: app.fetch,
+  port: Number(port)
+});
