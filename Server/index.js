@@ -45,6 +45,24 @@ function getMimeType(fileName) {
   return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
+// יצירת קוד כיתה: 4 ספרות + 4 אותיות אנגליות גדולות, מעורבבים (סה"כ 8 תווים)
+function generateClassCode() {
+  const digits = '0123456789';
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+  const chars = [];
+  for (let i = 0; i < 4; i++) chars.push(digits[Math.floor(Math.random() * digits.length)]);
+  for (let i = 0; i < 4; i++) chars.push(letters[Math.floor(Math.random() * letters.length)]);
+
+  // ערבוב (Fisher-Yates) כדי שהספרות והאותיות לא יהיו בבלוקים נפרדים
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+
+  return chars.join('');
+}
+
 // כותרות HTTP חייבות להיות ASCII — שם קובץ עם עברית/תווים לא-ASCII חייב קידוד לפי RFC 5987.
 // נותנים גם fallback ASCII (filename=) וגם את השם המקורי המקודד (filename*=UTF-8''...)
 function buildContentDisposition(disposition, fileName) {
@@ -160,16 +178,23 @@ const handleCreateClass = async (c) => {
     const name = body.name || 'כיתה ללא שם';
     const userId = body.userId || null;
 
+    const { classes, sha } = await readClassesFromGitHub();
+
+    // ודא שהקוד ייחודי מול הכיתות הקיימות (סיכוי התנגשות זניח, אבל בכל זאת)
+    let code;
+    do {
+      code = generateClassCode();
+    } while (classes.some(cls => cls.code === code));
+
     const newClass = {
       id: Math.random().toString(36).substring(2, 9),
       name: name,
-      code: Math.floor(1000 + Math.random() * 9000).toString(),
+      code: code,
       membersCount: 1,
       members: userId ? [userId] : [], // רשימת מזהי משתמשים שכבר חברים בכיתה
       files: [] // רשימת קבצים שייכת מעתה לאובייקט הכיתה עצמו
     };
 
-    const { classes, sha } = await readClassesFromGitHub();
     classes.push(newClass);
     await writeClassesToGitHub(classes, sha);
 
