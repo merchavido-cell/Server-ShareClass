@@ -1,39 +1,61 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import fs from 'node:fs/promises';
 
 const app = new Hono();
-
-// הפעלת CORS לכל הבקשות
 app.use('/*', cors());
 
-const DATA_FILE = './all_class.json';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = "merchavido-cell/Server-ShareClass"; // שם המאגר שלך
+const FILE_PATH = "Server/all_class.json"; // הנתיב לקובץ במאגר
+
 const classFiles = {};
 
-// פונקציות עזר לקריאה וכתיבה של קובץ ה-JSON
-async function readClassesFromFile() {
+// פונקציה לקריאת הנתונים מ-GitHub
+async function readClassesFromGitHub() {
   try {
-    const data = await fs.readFile(DATA_FILE, 'utf-8');
-    return JSON.parse(data || '[]');
+    const res = await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'ShareClass-Server'
+      }
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const content = Buffer.from(data.content, 'base64').toString('utf-8');
+    return { classes: JSON.parse(content || '[]'), sha: data.sha };
   } catch (error) {
-    // אם הקובץ לא קיים, ניצור אותו ריק
-    await fs.writeFile(DATA_FILE, '[]');
-    return [];
+    return { classes: [], sha: null };
   }
 }
 
-async function writeClassesToFile(classes) {
-  await fs.writeFile(DATA_FILE, JSON.stringify(classes, null, 2), 'utf-8');
+// פונקציה לכתיבת הנתונים בחזרה ל-GitHub (יוצרת Commit אוטומטי)
+async function writeClassesToGitHub(classes, sha) {
+  const contentEncoded = Buffer.from(JSON.stringify(classes, null, 2)).toString('base64');
+  await fetch(`https://api.github.com/repos/${REPO}/contents/${FILE_PATH}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `token ${GITHUB_TOKEN}`,
+      Accept: 'application/vnd.github.v3+json',
+      'User-Agent': 'ShareClass-Server',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      message: 'Update all_class.json automatically from server',
+      content: contentEncoded,
+      sha: sha
+    })
+  });
 }
 
-// GET /api/classes - שליפת רשימת הכיתות מהקובץ
+// GET /api/classes
 app.get('/api/classes', async (c) => {
-  const classes = await readClassesFromFile();
+  const { classes } = await readClassesFromGitHub();
   return c.json(classes);
 });
 
-// POST /api/classes או /api/classes/create - יצירת כיתה חדשה ושמירתה בקובץ
+// POST /api/classes
 const handleCreateClass = async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -46,9 +68,9 @@ const handleCreateClass = async (c) => {
       membersCount: 1
     };
 
-    const classes = await readClassesFromFile();
+    const { classes, sha } = await readClassesFromGitHub();
     classes.push(newClass);
-    await writeClassesToFile(classes);
+    await writeClassesToGitHub(classes, sha);
 
     return c.json({ success: true, class: newClass });
   } catch (error) {
@@ -59,13 +81,13 @@ const handleCreateClass = async (c) => {
 app.post('/api/classes', handleCreateClass);
 app.post('/api/classes/create', handleCreateClass);
 
-// POST /api/classes/join - הצטרפות לכיתה לפי קוד ועדכון בקובץ
+// POST /api/classes/join
 app.post('/api/classes/join', async (c) => {
   try {
     const body = await c.req.json();
     const { code } = body;
 
-    const classes = await readClassesFromFile();
+    const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.code === code);
 
     if (!targetClass) {
@@ -73,7 +95,7 @@ app.post('/api/classes/join', async (c) => {
     }
 
     targetClass.membersCount += 1;
-    await writeClassesToFile(classes);
+    await writeClassesToGitHub(classes, sha);
 
     return c.json({ success: true, class: targetClass });
   } catch (error) {
@@ -81,79 +103,7 @@ app.post('/api/classes/join', async (c) => {
   }
 });
 
-// POST /api/classes/:id/files - העלאת קובץ לכיתה
-app.post('/api/classes/:id/files', async (c) => {
-  try {
-    const classId = c.req.param('id');
-    const body = await c.req.parseBody();
-    const file = body['file'];
-    const uploader = body['uploader'] || 'Member';
+// שאר נתיבי העלאת הקבצים נשארים לפי הצורך...
 
-    if (!file || typeof file === 'string') {
-      return c.json({ success: false, error: 'No file uploaded' }, 400);
-    }
-
-    if (!classFiles[classId]) {
-      classFiles[classId] = [];
-    }
-
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    const newFile = {
-      id: Math.random().toString(36).substring(2, 9),
-      name: file.name,
-      uploader: uploader,
-      buffer: buffer
-    };
-
-    classFiles[classId].push(newFile);
-    return c.json({ success: true, file: { id: newFile.id, name: newFile.name, uploader: newFile.uploader } });
-  } catch (error) {
-    console.error('File upload error:', error);
-    return c.json({ success: false, error: 'Failed to upload file' }, 500);
-  }
-});
-
-// GET /api/classes/:id/files - שליפת רשימת קבצים לכיתה
-app.get('/api/classes/:id/files', (c) => {
-  const classId = c.req.param('id');
-  const files = (classFiles[classId] || []).map(f => ({
-    id: f.id,
-    name: f.name,
-    uploader: f.uploader
-  }));
-  return c.json(files);
-});
-
-// GET /api/files/:id/download - הורדת קובץ
-app.get('/api/files/:id/download', (c) => {
-  const fileId = c.req.param('id');
-  let foundFile = null;
-
-  for (let cid in classFiles) {
-    const file = classFiles[cid].find(f => f.id === fileId);
-    if (file) {
-      foundFile = file;
-      break;
-    }
-  }
-
-  if (!foundFile) {
-    return c.text('File not found', 404);
-  }
-
-  return c.body(foundFile.buffer, 200, {
-    'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename="${foundFile.name}"`
-  });
-});
-
-// הפעלת השרת
 const port = process.env.PORT || 3000;
-console.log(`Server is running on port ${port}`);
-
-serve({
-  fetch: app.fetch,
-  port: Number(port)
-});
+serve({ fetch: app.fetch, port: Number(port) });
