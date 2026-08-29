@@ -1,22 +1,39 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import fs from 'node:fs/promises';
 
 const app = new Hono();
 
 // הפעלת CORS לכל הבקשות
 app.use('/*', cors());
 
-// שמירת הנתונים בזיכרון
-let classes = [];
+const DATA_FILE = './all_class.json';
 const classFiles = {};
 
-// GET /api/classes - שליפת רשימת הכיתות
-app.get('/api/classes', (c) => {
+// פונקציות עזר לקריאה וכתיבה של קובץ ה-JSON
+async function readClassesFromFile() {
+  try {
+    const data = await fs.readFile(DATA_FILE, 'utf-8');
+    return JSON.parse(data || '[]');
+  } catch (error) {
+    // אם הקובץ לא קיים, ניצור אותו ריק
+    await fs.writeFile(DATA_FILE, '[]');
+    return [];
+  }
+}
+
+async function writeClassesToFile(classes) {
+  await fs.writeFile(DATA_FILE, JSON.stringify(classes, null, 2), 'utf-8');
+}
+
+// GET /api/classes - שליפת רשימת הכיתות מהקובץ
+app.get('/api/classes', async (c) => {
+  const classes = await readClassesFromFile();
   return c.json(classes);
 });
 
-// POST /api/classes או /api/classes/create - יצירת כיתה חדשה
+// POST /api/classes או /api/classes/create - יצירת כיתה חדשה ושמירתה בקובץ
 const handleCreateClass = async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
@@ -29,7 +46,10 @@ const handleCreateClass = async (c) => {
       membersCount: 1
     };
 
+    const classes = await readClassesFromFile();
     classes.push(newClass);
+    await writeClassesToFile(classes);
+
     return c.json({ success: true, class: newClass });
   } catch (error) {
     return c.json({ success: false, error: 'Invalid request' }, 400);
@@ -39,12 +59,13 @@ const handleCreateClass = async (c) => {
 app.post('/api/classes', handleCreateClass);
 app.post('/api/classes/create', handleCreateClass);
 
-// POST /api/classes/join - הצטרפות לכיתה לפי קוד
+// POST /api/classes/join - הצטרפות לכיתה לפי קוד ועדכון בקובץ
 app.post('/api/classes/join', async (c) => {
   try {
     const body = await c.req.json();
     const { code } = body;
 
+    const classes = await readClassesFromFile();
     const targetClass = classes.find((cls) => cls.code === code);
 
     if (!targetClass) {
@@ -52,6 +73,8 @@ app.post('/api/classes/join', async (c) => {
     }
 
     targetClass.membersCount += 1;
+    await writeClassesToFile(classes);
+
     return c.json({ success: true, class: targetClass });
   } catch (error) {
     return c.json({ success: false, error: 'Invalid request' }, 400);
