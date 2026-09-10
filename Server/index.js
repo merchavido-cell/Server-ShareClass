@@ -121,6 +121,39 @@ async function githubPutFile(path, base64Content, sha, message) {
   return res.json();
 }
 
+// מזהה את "מקים הכיתה" - במחלקות ישנות זה פשוט החבר הראשון ברשימה (כפי שהיה עד היום),
+// ובמחלקות חדשות זה שדה ownerId מפורש שנשמר בזמן היצירה.
+function getOwnerId(cls) {
+  if (cls.ownerId) return cls.ownerId;
+  if (Array.isArray(cls.members) && cls.members.length > 0) {
+    const first = cls.members[0];
+    return typeof first === 'string' ? first : ((first && (first.userId || first.id)) || null);
+  }
+  return null;
+}
+
+// שמירת קובץ שהועלה (מפוסט, ממטלה, או מהגשה) כ-blob ב-GitHub, מחזיר מטא-דאטה של הקובץ
+async function storeClassFile(classId, file) {
+  const fileId = Math.random().toString(36).substring(2, 9);
+  const arrayBuffer = await file.arrayBuffer();
+  const base64Content = Buffer.from(arrayBuffer).toString('base64');
+  const storagePath = `${FILES_DIR}/${classId}/${fileId}_${file.name}`;
+  await githubPutFile(storagePath, base64Content, null, `Upload file ${file.name} to class ${classId}`);
+  return { id: fileId, name: file.name, path: storagePath };
+}
+
+// אוסף את כל הקבצים השייכים לכיתה ממקורות שונים (files ישנים, פוסטים, מטלות והגשות)
+// לצורך חיפוש קובץ בודד לפי id בהורדה
+function collectAllFiles(cls) {
+  const all = [...(cls.files || [])];
+  (cls.posts || []).forEach(p => { if (p.file) all.push(p.file); });
+  (cls.assignments || []).forEach(a => {
+    if (a.file) all.push(a.file);
+    (a.submissions || []).forEach(s => { if (s.file) all.push(s.file); });
+  });
+  return all;
+}
+
 // ---------- ניהול all_class.json ----------
 
 async function readClassesFromGitHub() {
@@ -171,6 +204,15 @@ app.get('/api/classes', async (c) => {
   return c.json(classes);
 });
 
+// GET /api/classes/:id - שליפת כיתה בודדת לפי id
+app.get('/api/classes/:id', async (c) => {
+  const classId = c.req.param('id');
+  const { classes } = await readClassesFromGitHub();
+  const targetClass = classes.find((cls) => cls.id === classId);
+  if (!targetClass) return c.json({ error: 'Class not found' }, 404);
+  return c.json(targetClass);
+});
+
 // POST /api/classes או /api/classes/create - יצירת כיתה חדשה
 const handleCreateClass = async (c) => {
   try {
@@ -192,7 +234,10 @@ const handleCreateClass = async (c) => {
       code: code,
       membersCount: 1,
       members: userId ? [userId] : [], // רשימת מזהי משתמשים שכבר חברים בכיתה
-      files: [] // רשימת קבצים שייכת מעתה לאובייקט הכיתה עצמו
+      ownerId: userId || null, // מקים הכיתה - הראשון שנכנס אליה; רק הוא יכול לשלוח מטלות
+      files: [], // רשימת קבצים שייכת מעתה לאובייקט הכיתה עצמו (נשמר לצורך תאימות לאחור)
+      posts: [], // פיד כללי של הכיתה - טקסטים וקבצים יחד
+      assignments: [] // מטלות שהמורה/המקים שולח, כולל ההגשות של החברים
     };
 
     classes.push(newClass);
@@ -258,17 +303,12 @@ app.post('/api/classes/:id/files', async (c) => {
       return c.json({ success: false, error: 'Class not found' }, 404);
     }
 
-    const fileId = Math.random().toString(36).substring(2, 9);
-    const arrayBuffer = await file.arrayBuffer();
-    const base64Content = Buffer.from(arrayBuffer).toString('base64');
-    const storagePath = `${FILES_DIR}/${classId}/${fileId}_${file.name}`;
-
     // שמירת תוכן הקובץ עצמו כ-blob ב-GitHub
-    await githubPutFile(storagePath, base64Content, null, `Upload file ${file.name} to class ${classId}`);
+    const stored = await storeClassFile(classId, file);
 
     // עדכון מטא-דאטה של הקובץ בתוך אובייקט הכיתה, ושמירה חזרה ל-all_class.json
     if (!targetClass.files) targetClass.files = [];
-    const newFileMeta = { id: fileId, name: file.name, uploader, path: storagePath };
+    const newFileMeta = { ...stored, uploader };
     targetClass.files.push(newFileMeta);
     await writeClassesToGitHub(classes, sha);
 
@@ -297,6 +337,199 @@ app.get('/api/classes/:id/files', async (c) => {
   return c.json(files);
 });
 
+// ---------- פיד הכיתה: הודעות טקסט וקבצים יחד ----------
+
+// POST /api/classes/:id/posts - יצירת פוסט חדש בכיתה (טקסט ו/או קובץ). כל חבר כיתה יכול לפרסם.
+app.post('/api/classes/:id/posts', async (c) => {
+  try {
+    const classId = c.req.param('id');
+    const body = await c.req.parseBody();
+    const userId = body['userId'] || null;
+    const authorName = body['name'] || 'Member';
+    const text = (body['text'] || '').toString().trim();
+    const file = body['file'];
+    const hasFile = file && typeof file !== 'string';
+
+    if (!text && !hasFile) {
+      return c.json({ success: false, error: 'Post must include text or a file' }, 400);
+    }
+
+    const { classes, sha } = await readClassesFromGitHub();
+    const targetClass = classes.find((cls) => cls.id === classId);
+    if (!targetClass) {
+      return c.json({ success: false, error: 'Class not found' }, 404);
+    }
+
+    let fileMeta = null;
+    if (hasFile) {
+      fileMeta = await storeClassFile(classId, file);
+    }
+
+    if (!targetClass.posts) targetClass.posts = [];
+    const newPost = {
+      id: Math.random().toString(36).substring(2, 9),
+      type: hasFile ? 'file' : 'text',
+      authorId: userId,
+      authorName,
+      text,
+      file: fileMeta,
+      createdAt: new Date().toISOString()
+    };
+
+    targetClass.posts.push(newPost);
+    await writeClassesToGitHub(classes, sha);
+
+    return c.json({ success: true, post: newPost, class: targetClass });
+  } catch (error) {
+    console.error('Create post error:', error);
+    return c.json({ success: false, error: 'Failed to create post' }, 500);
+  }
+});
+
+// GET /api/classes/:id/posts - שליפת כל הפוסטים של הכיתה (טקסטים וקבצים), בסדר כרונולוגי
+app.get('/api/classes/:id/posts', async (c) => {
+  const classId = c.req.param('id');
+  const { classes } = await readClassesFromGitHub();
+  const targetClass = classes.find((cls) => cls.id === classId);
+  if (!targetClass) return c.json([], 404);
+  return c.json(targetClass.posts || []);
+});
+
+// ---------- מטלות: המקים שולח מטלה, וכל חבר יכול להגיש לו ----------
+
+// POST /api/classes/:id/assignments - יצירת מטלה חדשה (רק מקים הכיתה רשאי)
+app.post('/api/classes/:id/assignments', async (c) => {
+  try {
+    const classId = c.req.param('id');
+    const body = await c.req.parseBody();
+    const userId = body['userId'] || null;
+    const authorName = body['name'] || 'Creator';
+    const title = (body['title'] || '').toString().trim();
+    const description = (body['description'] || '').toString().trim();
+    const file = body['file'];
+    const hasFile = file && typeof file !== 'string';
+
+    if (!title) {
+      return c.json({ success: false, error: 'Assignment title is required' }, 400);
+    }
+
+    const { classes, sha } = await readClassesFromGitHub();
+    const targetClass = classes.find((cls) => cls.id === classId);
+    if (!targetClass) {
+      return c.json({ success: false, error: 'Class not found' }, 404);
+    }
+
+    const ownerId = getOwnerId(targetClass);
+    if (!userId || userId !== ownerId) {
+      return c.json({ success: false, error: 'רק מקים הכיתה יכול לשלוח מטלות' }, 403);
+    }
+
+    let fileMeta = null;
+    if (hasFile) {
+      fileMeta = await storeClassFile(classId, file);
+    }
+
+    if (!targetClass.assignments) targetClass.assignments = [];
+    const newAssignment = {
+      id: Math.random().toString(36).substring(2, 9),
+      title,
+      description,
+      authorId: userId,
+      authorName,
+      file: fileMeta,
+      createdAt: new Date().toISOString(),
+      submissions: []
+    };
+
+    targetClass.assignments.push(newAssignment);
+    await writeClassesToGitHub(classes, sha);
+
+    return c.json({ success: true, assignment: newAssignment, class: targetClass });
+  } catch (error) {
+    console.error('Create assignment error:', error);
+    return c.json({ success: false, error: 'Failed to create assignment' }, 500);
+  }
+});
+
+// GET /api/classes/:id/assignments?userId=... - שליפת מטלות הכיתה.
+// מקים הכיתה רואה את כל ההגשות של כולם; חבר רגיל רואה רק את ההגשות שלו עצמו.
+app.get('/api/classes/:id/assignments', async (c) => {
+  const classId = c.req.param('id');
+  const requesterId = c.req.query('userId') || null;
+  const { classes } = await readClassesFromGitHub();
+  const targetClass = classes.find((cls) => cls.id === classId);
+  if (!targetClass) return c.json([], 404);
+
+  const ownerId = getOwnerId(targetClass);
+  const isOwner = !!requesterId && requesterId === ownerId;
+
+  const assignments = (targetClass.assignments || []).map(a => ({
+    ...a,
+    submissions: isOwner
+      ? (a.submissions || [])
+      : (a.submissions || []).filter(s => s.studentId === requesterId)
+  }));
+
+  return c.json(assignments);
+});
+
+// POST /api/classes/:id/assignments/:assignmentId/submissions - הגשת מטלה ע"י חבר כיתה למקים הכיתה
+app.post('/api/classes/:id/assignments/:assignmentId/submissions', async (c) => {
+  try {
+    const classId = c.req.param('id');
+    const assignmentId = c.req.param('assignmentId');
+    const body = await c.req.parseBody();
+    const userId = body['userId'] || null;
+    const studentName = body['name'] || 'Student';
+    const text = (body['text'] || '').toString().trim();
+    const file = body['file'];
+    const hasFile = file && typeof file !== 'string';
+
+    if (!text && !hasFile) {
+      return c.json({ success: false, error: 'Submission must include text or a file' }, 400);
+    }
+
+    const { classes, sha } = await readClassesFromGitHub();
+    const targetClass = classes.find((cls) => cls.id === classId);
+    if (!targetClass) {
+      return c.json({ success: false, error: 'Class not found' }, 404);
+    }
+
+    const assignment = (targetClass.assignments || []).find(a => a.id === assignmentId);
+    if (!assignment) {
+      return c.json({ success: false, error: 'Assignment not found' }, 404);
+    }
+
+    let fileMeta = null;
+    if (hasFile) {
+      fileMeta = await storeClassFile(classId, file);
+    }
+
+    if (!assignment.submissions) assignment.submissions = [];
+    const newSubmission = {
+      id: Math.random().toString(36).substring(2, 9),
+      studentId: userId,
+      studentName,
+      text,
+      file: fileMeta,
+      submittedAt: new Date().toISOString()
+    };
+
+    assignment.submissions.push(newSubmission);
+    await writeClassesToGitHub(classes, sha);
+
+    return c.json({
+      success: true,
+      submission: newSubmission,
+      ownerId: getOwnerId(targetClass),
+      class: targetClass
+    });
+  } catch (error) {
+    console.error('Submit assignment error:', error);
+    return c.json({ success: false, error: 'Failed to submit assignment' }, 500);
+  }
+});
+
 // GET /api/files/:id/download - הבאת קובץ. ?view=1 → פתיחה inline בדפדפן (אם הסוג נתמך); בלי הפרמטר → הורדה תמיד
 app.get('/api/files/:id/download', async (c) => {
   try {
@@ -306,7 +539,7 @@ app.get('/api/files/:id/download', async (c) => {
 
     let foundFile = null;
     for (const cls of classes) {
-      const match = (cls.files || []).find(f => f.id === fileId);
+      const match = collectAllFiles(cls).find(f => f.id === fileId);
       if (match) {
         foundFile = match;
         break;
