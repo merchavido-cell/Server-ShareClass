@@ -10,6 +10,29 @@ const REPO = "merchavido-cell/Server-ShareClass";
 const FILE_PATH = "Server/all_class.json";
 const FILES_DIR = "Server/files"; // תיקייה ב-GitHub בה יישמר תוכן הקבצים שמועלים
 
+// ---------- הגבלת גודל קובץ ----------
+// הקבצים נשמרים כ-base64 דרך GitHub Contents API. ל-API הזה יש תקרה קשיחה (100MB),
+// וה-base64 מגדיל את הקובץ בערך פי 1.33 בזיכרון של השרת בזמן ההעלאה - על שרת קטן (כמו Render free/starter)
+// קובץ גדול מדי יכול לגרום ל-crash מחוסר זיכרון או ל-timeout. 20MB הוא גבול בטוח שמכסה כמעט כל
+// מסמך/תמונה/מצגת רגילים בלי לסכן את השרת.
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_FILE_SIZE_LABEL = '20MB';
+
+// בדיקה מוקדמת לפי Content-Length, לפני שקוראים בכלל את גוף הבקשה לזיכרון (חוסכת עומס במקרה של קובץ ענק)
+function requestTooLarge(c) {
+  const contentLength = Number(c.req.header('content-length') || 0);
+  // מוסיפים מרווח קטן לשדות הטופס הנוספים (userId, text וכו') כדי לא לדחות קבצים לגיטימיים בגבול העליון
+  return contentLength > MAX_FILE_SIZE_BYTES + (256 * 1024);
+}
+
+function fileSizeExceeded(file) {
+  return !!(file && typeof file !== 'string' && typeof file.size === 'number' && file.size > MAX_FILE_SIZE_BYTES);
+}
+
+function oversizedFileResponse(c) {
+  return c.json({ success: false, error: `הקובץ גדול מדי. הגודל המרבי המותר הוא ${MAX_FILE_SIZE_LABEL}.` }, 413);
+}
+
 // ---------- זיהוי MIME type לפי סיומת, כדי לאפשר פתיחה בדפדפן (לא רק הורדה) ----------
 
 const MIME_TYPES = {
@@ -287,6 +310,8 @@ app.post('/api/classes/join', async (c) => {
 // POST /api/classes/:id/files - העלאת קובץ לכיתה (נשמר בפועל ב-GitHub, מקושר לנתוני הכיתה)
 app.post('/api/classes/:id/files', async (c) => {
   try {
+    if (requestTooLarge(c)) return oversizedFileResponse(c);
+
     const classId = c.req.param('id');
     const body = await c.req.parseBody();
     const file = body['file'];
@@ -295,6 +320,7 @@ app.post('/api/classes/:id/files', async (c) => {
     if (!file || typeof file === 'string') {
       return c.json({ success: false, error: 'No file uploaded' }, 400);
     }
+    if (fileSizeExceeded(file)) return oversizedFileResponse(c);
 
     const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.id === classId);
@@ -342,6 +368,8 @@ app.get('/api/classes/:id/files', async (c) => {
 // POST /api/classes/:id/posts - יצירת פוסט חדש בכיתה (טקסט ו/או קובץ). כל חבר כיתה יכול לפרסם.
 app.post('/api/classes/:id/posts', async (c) => {
   try {
+    if (requestTooLarge(c)) return oversizedFileResponse(c);
+
     const classId = c.req.param('id');
     const body = await c.req.parseBody();
     const userId = body['userId'] || null;
@@ -353,6 +381,7 @@ app.post('/api/classes/:id/posts', async (c) => {
     if (!text && !hasFile) {
       return c.json({ success: false, error: 'Post must include text or a file' }, 400);
     }
+    if (hasFile && fileSizeExceeded(file)) return oversizedFileResponse(c);
 
     const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.id === classId);
@@ -400,6 +429,8 @@ app.get('/api/classes/:id/posts', async (c) => {
 // POST /api/classes/:id/assignments - יצירת מטלה חדשה (רק מקים הכיתה רשאי)
 app.post('/api/classes/:id/assignments', async (c) => {
   try {
+    if (requestTooLarge(c)) return oversizedFileResponse(c);
+
     const classId = c.req.param('id');
     const body = await c.req.parseBody();
     const userId = body['userId'] || null;
@@ -412,6 +443,7 @@ app.post('/api/classes/:id/assignments', async (c) => {
     if (!title) {
       return c.json({ success: false, error: 'Assignment title is required' }, 400);
     }
+    if (hasFile && fileSizeExceeded(file)) return oversizedFileResponse(c);
 
     const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.id === classId);
@@ -476,6 +508,8 @@ app.get('/api/classes/:id/assignments', async (c) => {
 // POST /api/classes/:id/assignments/:assignmentId/submissions - הגשת מטלה ע"י חבר כיתה למקים הכיתה
 app.post('/api/classes/:id/assignments/:assignmentId/submissions', async (c) => {
   try {
+    if (requestTooLarge(c)) return oversizedFileResponse(c);
+
     const classId = c.req.param('id');
     const assignmentId = c.req.param('assignmentId');
     const body = await c.req.parseBody();
@@ -488,6 +522,7 @@ app.post('/api/classes/:id/assignments/:assignmentId/submissions', async (c) => 
     if (!text && !hasFile) {
       return c.json({ success: false, error: 'Submission must include text or a file' }, 400);
     }
+    if (hasFile && fileSizeExceeded(file)) return oversizedFileResponse(c);
 
     const { classes, sha } = await readClassesFromGitHub();
     const targetClass = classes.find((cls) => cls.id === classId);
